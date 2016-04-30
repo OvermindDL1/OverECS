@@ -1,0 +1,4 @@
+[Project]
+Name=ecs_bench_over
+Manager=KDevCMakeManager
+VersionControl=kdevgit

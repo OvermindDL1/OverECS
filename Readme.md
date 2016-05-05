@@ -8,3 +8,6 @@ Currently in are Entities, Component tables, and Aspects, though all are a littl
 
 Currently not done is the generic Event system, helpers to make defining the components less painful, and a bit more.
 
+
+
+[![Join the chat at https://gitter.im/OvermindDL1/OverECS](https://badges.gitter.im/OvermindDL1/OverECS.svg)](https://gitter.im/OvermindDL1/OverECS?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge)

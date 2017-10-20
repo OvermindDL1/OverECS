@@ -21,7 +21,7 @@ find_package(Eigen3 CONFIG REQUIRED)
 
 find_package(Threads)
 
-include_directories (${EIGEN3_INCLUDE_DIRS})
+include_directories (${EIGEN3_INCLUDE_DIRS} ".")
 
 add_executable(ecs_bench_over main.cpp)
 

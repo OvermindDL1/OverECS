@@ -11,7 +11,9 @@
 #include <unordered_set>
 #include <stack>
 
+// Used for components and testing with real scenarios from internal engine
 #include <Eigen/Core>
+#include <sparsepp/spp.h>
 
 
 using namespace OverLib::StringAtom;
@@ -52,6 +54,12 @@ template <> struct hash<OverECS::EntityID> {
 
 namespace OverECS
 {
+
+class EntityRemovedCB
+{
+public:
+    virtual void entity_removed(EntityID entity) = 0;
+};
 
 class ComponentTable
 {
@@ -175,10 +183,18 @@ public:
         }
     }
 
+    bool validEntity(EntityID entity)
+    {
+        return entity.generation > 0 &&
+               generations_.size() >= entity.id &&
+               generations_[entity.id] == entity.generation;
+    }
+
+
     void destroyEntity(EntityID& entity)
     {
         uint32_t generation = generations_[entity.id];
-        if (entity.generation ==  generation) {
+        if (entity.generation == generation) {
             performEntityDestructionCallbacks(entity);
             generations_[entity.id] = generation + 1;
             free_entities_.push(entity.id);
@@ -191,21 +207,21 @@ public:
         entity.generation = 0;
     }
 
-//     bool registerEntityDestructionCB(EntityID entity, std::function<void(EntityID)>& cb)
-//     {
-//         if (entity.generation != generations_[entity.id]) {
-//             return false;
-//         }
-//         if (entity_destruction_cbs_.size() >= entity.id) {
-//             entity_destruction_cbs_.resize(entity.id + 1);
-//         }
-//         entity_destruction_cbs_[entity.id].emplace_back(cb);
-//         return true;
-//     }
+    bool registerEntityDestructionCB(EntityID entity, EntityRemovedCB &cb)
+    {
+        if (!validEntity(entity)) {
+            return false;
+        }
+        if (entity_destruction_cbs_.size() < entity.id) {
+            entity_destruction_cbs_.resize(entity.id + 1);
+        }
+        entity_destruction_cbs_[entity.id].emplace_back(&cb);
+        return true;
+    }
 
     bool registerEntityDestructionVector(EntityID entity, std::vector<uint32_t>& target)
     {
-        if (entity.generation != generations_[entity.id]) {
+        if (!validEntity(entity)) {
             return false;
         }
         if (entity_destruction_vectors_.size() <= entity.id) {
@@ -217,7 +233,7 @@ public:
 
     bool registerEntityDestructionUMap(EntityID entity, std::unordered_map<uint32_t, uint32_t>& target)
     {
-        if (entity.generation != generations_[entity.id]) {
+        if (!validEntity(entity)) {
             return false;
         }
         if (entity_destruction_umaps_.size() <= entity.id) {
@@ -226,22 +242,22 @@ public:
         entity_destruction_umaps_[entity.id].emplace(&target);
         return true;
     }
-
-//     bool unregisterEntityDestructionCB(EntityID entity, std::function<void(EntityID)>& cb)
-//     {
-//         if (entity.generation != generations_[entity.id]) {
-//             return false;
-//         }
-//         if (entity_destruction_cbs_.size() >= entity.id) {
-//             return false;
-//         }
-//         auto &deq = entity_destruction_cbs_[entity.id];
-//         auto found = deq.find(cb)
-//     }
-
+/* Hmm, don't need if we clear it when destroyed anyway...
+    bool unregisterEntityDestructionCB(EntityID entity, EntityRemovedCB &cb)
+    {
+        if (!validEntity(entity)) {
+            return false;
+        }
+        if (entity_destruction_cbs_.size() >= entity.id) {
+            return false;
+        }
+        auto &vec = entity_destruction_cbs_[entity.id];
+        auto found = vec.find(cb)
+    }
+*/
     bool unregisterEntityDestructionVector(EntityID entity, std::vector<uint32_t>& target)
     {
-        if (entity.generation != generations_[entity.id]) {
+        if (!validEntity(entity)) {
             return false;
         }
         if (entity_destruction_vectors_.size() >= entity.id) {
@@ -258,7 +274,7 @@ public:
 
     bool unregisterEntityDestructionUMap(EntityID entity, std::unordered_map<uint32_t, uint32_t>& target)
     {
-        if (entity.generation != generations_[entity.id]) {
+        if (!validEntity(entity)) {
             return false;
         }
         if (entity_destruction_umaps_.size() >= entity.id) {
@@ -288,6 +304,12 @@ public:
                 map->erase(entity.id);
             }
             maps.clear();
+        }
+        if (entity_destruction_cbs_.size() >= entity.id) {
+            for (auto cb : entity_destruction_cbs_[entity.id]) {
+                cb->entity_removed(entity);
+            }
+            entity_destruction_cbs_.clear();
         }
         entity_components.erase(entity.id);
     }
@@ -390,7 +412,7 @@ public:
     std::vector<uint32_t> generations_;
     std::stack<uint32_t> free_entities_;
     std::unordered_map<Atom64, ComponentTable&> component_tables_;
-//     std::vector<std::deque<std::function<void(EntityID)>>> entity_destruction_cbs_;
+    std::vector<std::vector<EntityRemovedCB*>> entity_destruction_cbs_;
     std::vector<std::set<std::vector<uint32_t>*>> entity_destruction_vectors_;
     std::vector<std::set<std::unordered_map<uint32_t, uint32_t>*>> entity_destruction_umaps_;
 
@@ -809,6 +831,69 @@ public:
     std::vector<uint32_t> generations_;
 };
 
+class SparseComp : public ComponentTable, EntityRemovedCB
+{
+    COMPONENTTABLE_METADATA(SparseComp);
+public:
+    SparseComp(size_t prealloc_entities = 512)
+        : ComponentTable()
+        , sparses_(prealloc_entities)
+    {
+        sparses_.set_deleted_key(0);
+    }
+
+    // Interface
+public:
+    // operator[] is, as usual in std, unchecked, be careful
+    Sparse &operator[](const EntityID entity)
+    {
+        return sparses_[entity.id];
+    }
+
+    const Sparse &operator[](const EntityID entity) const
+    {
+        const auto it = sparses_.find(entity.id);
+        if (it == sparses_.end()) return emptySparse_;
+        return it->second;
+    }
+
+    //  These are the checked versions of above
+   Sparse *get(EntityID entity)
+    {
+        if (!context_->validEntity(entity)) return nullptr;
+        return &sparses_[entity.id];
+    }
+
+    Sparse &getOrCreate(EntityID entity)
+    {
+        return getOrCreate(entity, {0, 0, 0, 0, 0});
+    }
+
+    Sparse &getOrCreate(EntityID entity, const Sparse &sparse)
+    {
+        if (!context_->validEntity(entity)) return emptySparse_;
+        if (sparses_.find(entity.id) == sparses_.end()) {
+            context_->registerEntityDestructionCB(entity, *this);
+            Sparse &s = sparses_[entity.id];
+            s = sparse;
+            context_->performComponentAdded(entity, GetStaticName());
+            return s;
+        }
+        return sparses_[entity.id];
+    }
+
+    void entity_removed(EntityID entity)
+    {
+        sparses_.erase(entity.id);
+    }
+
+protected:
+public:
+    // Vector due to it being dense
+    spp::sparse_hash_map<uint32_t, Sparse> sparses_;
+    Sparse emptySparse_;
+};
+
 void build(Context& context)
 {
     PosComp* positions = context.getComponentTable<PosComp>();
@@ -829,7 +914,7 @@ void build(Context& context)
 
 }
 
-
+#if 0
 NONIUS_BENCHMARK("pos_vel build_destroy", [](nonius::chronometer meter)
 {
     using namespace OverECS;
@@ -891,7 +976,33 @@ NONIUS_BENCHMARK("pos_vel update", [](nonius::chronometer meter)
     });
     //std::cout << "ret:" << ret << " pv:" << retpv << " p:" << retp << std::endl;
 })
-
+/*
+NONIUS_BENCHMARK("pos_vel_eigen sparse update", [](nonius::chronometer meter)
+{
+    using namespace OverECS;
+    using namespace pos_vel_eigen;
+    PosComp positions;
+    VelComp velocities;
+    SparseComp sparses;
+    Context context;
+    context.registerComponentTable(positions);
+    context.registerComponentTable(velocities);
+    context.registerComponentTable(sparses);
+    AspectStorage& posvelStorage = Aspects::required<PosComp, VelComp>().connect(context);
+    AspectStorage& posStorage = Aspects::required<PosComp>().connect(context);
+    AspectStorage& sparsesStorage = Aspects::required<SparseComp>().connect(context);
+    // setup entities
+    build(context);
+    // TODO: Setup some random sparse things
+    meter.measure([&] {
+        for (auto entity : sparsesStorage.matching_entities_)
+        {
+            Sparse &sparse = sparses[entity];
+            sparse.type += 42;
+        }
+    });
+})
+*/
 
 NONIUS_BENCHMARK("pos_vel_eigen build_destroy", [](nonius::chronometer meter)
 {
@@ -941,3 +1052,68 @@ NONIUS_BENCHMARK("pos_vel_eigen update", [](nonius::chronometer meter)
     });
     //std::cout << "ret:" << ret << " pv:" << retpv << " p:" << retp << std::endl;
 })
+#endif
+NONIUS_BENCHMARK("pos_vel_eigen sparse update", [](nonius::chronometer meter)
+{
+    using namespace OverECS;
+    using namespace pos_vel_eigen;
+    PosComp positions;
+    VelComp velocities;
+    SparseComp sparses;
+    Context context;
+    context.registerComponentTable(positions);
+    context.registerComponentTable(velocities);
+    context.registerComponentTable(sparses);
+    AspectStorage& posvelStorage = Aspects::required<PosComp, VelComp>().connect(context);
+    AspectStorage& posStorage = Aspects::required<PosComp>().connect(context);
+    AspectStorage& sparsesStorage = Aspects::required<SparseComp>().connect(context);
+    build(context);
+    for (int i = 0; i < pos_vel::N_SPARSE; ++i) {
+        uint32_t entID = rand() % pos_vel::N_MAX + 1;
+        EntityID entity = {entID, context.generations_[entID]};
+        sparses.getOrCreate(entity, {i, i, i, i, i});
+    }
+    int ret = 0;
+    meter.measure([&] {
+        for (auto entity : sparsesStorage.matching_entities_)
+        {
+            Sparse &sparse = sparses[entity];
+            //ret += sparse.type;
+        }
+    });
+    //std::cout << "ret:" << ret << std::endl;
+    return ret;
+})
+
+NONIUS_BENCHMARK("pos_vel_eigen efficient sparse update", [](nonius::chronometer meter)
+{
+    using namespace OverECS;
+    using namespace pos_vel_eigen;
+    PosComp positions;
+    VelComp velocities;
+    SparseComp sparses;
+    Context context;
+    context.registerComponentTable(positions);
+    context.registerComponentTable(velocities);
+    context.registerComponentTable(sparses);
+    AspectStorage& posvelStorage = Aspects::required<PosComp, VelComp>().connect(context);
+    AspectStorage& posStorage = Aspects::required<PosComp>().connect(context);
+    AspectStorage& sparsesStorage = Aspects::required<SparseComp>().connect(context);
+    build(context);
+    for (int i = 0; i < pos_vel::N_SPARSE; ++i) {
+        uint32_t entID = rand() % pos_vel::N_MAX + 1;
+        EntityID entity = {entID, context.generations_[entID]};
+        sparses.getOrCreate(entity, {i, i, i, i, i});
+    }
+    int ret = pos_vel::N_SPARSE;
+    meter.measure([&] {
+        for (auto p : sparses.sparses_)
+        {
+            Sparse &sparse = p.second;
+            //ret += sparse.type;
+        }
+    });
+    //std::cout << "ret:" << ret << " " << sparses.sparses_.size() << std::endl;
+    return ret;
+})
+
